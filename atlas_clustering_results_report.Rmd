@@ -1,0 +1,238 @@
+---
+title: "Clustering in atlas data (with clusters corrected)"
+output: html_document
+---
+
+```{r load data, message=FALSE, warning=FALSE,include=FALSE}
+require(GGally)
+require(caret)
+require(knitr)
+require(kableExtra)
+require(ggplot2)
+require(ggridges)
+require(registr)
+#cb_atl = readRDS('~/../../media/disk2/atlas_mxif/combat_201214/colon_map_20201214_combat_adj_with_clusters.rds')
+#cb_atl = readRDS('~/../../media/disk2/atlas_mxif/combat_201214/colon_map_202z01214_combat_adj_with_corrected_clusters.rds')
+#cb_atl = readRDS("~/../../media/disk2/atlas_mxif/combat/handling_zero=es/method5_1229/atl_with_clusters1.rds")
+
+#cb_atl = readRDS("~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method5_1229/atl_with_clusters_and_centered_1231.rds")
+#cb_atl = readRDS("~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method7_0107/atl_with_all_methods_updated_0107.rds")
+#cb_atl = readRDS("~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method8_0119/atl_with_all_methods_updated_0119.rds")
+#cb_atl = readRDS("~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method9_0122/atl_with_all_methods_updated_0122.rds")
+cb_atl = readRDS("~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method10_0301/atl_with_fda_210302.rds")
+
+raw_vars = c('Median_Cell_NAKATPASE',
+              'Median_Cell_PANCK',
+              'Median_Cell_VIMENTIN')
+log_vars = paste0(raw_vars,"_log10")
+simple_vars = paste0(raw_vars,"_simple_adjusted")
+simple_vars_centered = paste0(raw_vars,"_simple_adjusted_centered")
+combat_vars = paste0(raw_vars,"_combat_slide_adjusted")
+combat_vars_og = paste0(raw_vars,"_ComBat_Adjusted")
+combat_vars_p = paste0(raw_vars,"_ComBat_Adjusted_slide_only_image_variance")
+simple2_vars = paste0(raw_vars,"_log10_simple2_adjusted")
+modal_vars = paste0(raw_vars,"_log10_modal_adjusted")
+modal_vars_zeroes_removed = paste0(raw_vars,"_log10_modal_adjusted_zeroes_removed")
+
+
+plot_slide = "MAP01391_0000_01_01"
+plot_atl = as.data.frame(cb_atl)[cb_atl$SlideID == plot_slide,]
+all_clus = colnames(plot_atl)[grepl("cluster",colnames(plot_atl))]
+
+plot_atl_raw = as.data.frame(plot_atl)[,c( raw_vars, 
+                                           log_vars, 
+                                           simple_vars, 
+                                           combat_vars,
+                                           combat_vars_og,
+                                           combat_vars_p,
+                                           simple2_vars,
+                                           modal_vars,
+                                           modal_vars_zeroes_removed,
+                                           simple_vars_centered,
+                                           all_clus)]
+```
+## Basic overview
+- 32 slides of colorectal tissue samples
+- Number of images ("regions of interest") per slide varies from 12, up to 522
+- We assume there are batch effects in the data, e.g. slide to slide variation that is not explainable by biological signal
+- For example, we are working with the marker Vimentin (VIM) -- a stromal/immune cell marker
+- Downstream, we aim to use VIM to build a clustering algorithm to identify different cell types in the tissues
+
+## Densities of VIM
+- Started with ComBat as our method of choice
+        - Normalization in multimodal data is not optimal
+- Basic approaches: `simple` and `modal`
+- What is happening with `registr`? Is there a better way to tune those spline hyperparams?
+
+```{r}
+marker = "VIM"
+
+ggplot(cb_atl) +
+        geom_density_ridges(aes(x=get(raw_vars[grepl(marker,raw_vars)]), y = SlideID,fill=SlideID)) +
+        ggtitle('Raw data')  +
+        theme_minimal() +
+        theme(legend.position = "none")
+
+ggplot(cb_atl) +
+        geom_density_ridges(aes(x=get(log_vars[grepl(marker,log_vars)]), y = SlideID,fill=SlideID)) +
+        ggtitle('Log data')  +
+        theme_minimal() +
+        theme(legend.position = "none")
+
+ggplot(cb_atl) +
+        geom_density_ridges(aes(x=get(simple_vars[grepl(marker,simple_vars)]), y = SlideID,fill=SlideID)) +
+        ggtitle('Simple adjusted data')  +
+        theme_minimal() +
+        theme(legend.position = "none") +
+        xlim(c(0,5))
+
+ggplot(cb_atl) +
+        geom_density_ridges(aes(x=get(simple_vars_centered[grepl(marker,simple_vars_centered)]), y = SlideID,fill=SlideID)) +
+        ggtitle('Simple adjusted data (centered)')  +
+        theme_minimal() +
+        theme(legend.position = "none") +
+        xlim(c(0,5))
+
+ggplot(cb_atl) +
+        geom_density_ridges(aes(x=get(combat_vars[grepl(marker,combat_vars)]), y = SlideID,fill=SlideID)) +
+        ggtitle('ComBat adjusted (slide only)')  +
+        theme_minimal() +
+        theme(legend.position = "none") +
+        xlim(c(0,5))
+
+ggplot(cb_atl) +
+        geom_density_ridges(aes(x=get(combat_vars_og[grepl(marker,combat_vars_og)]), y = SlideID,fill=SlideID)) +
+        ggtitle('ComBat adjusted (original method)')  +
+        theme_minimal() +
+        theme(legend.position = "none")
+
+
+ggplot(cb_atl) +
+        geom_density_ridges(aes(x=get(combat_vars_p[grepl(marker,combat_vars_p)]), y = SlideID,fill=SlideID)) +
+        ggtitle('ComBat adjusted (slide only, with image level variance)')  +
+        theme_minimal() +
+        theme(legend.position = "none")
+
+ggplot(cb_atl) +
+        geom_density_ridges(aes(x=get(simple2_vars[grepl(marker,simple2_vars)]), y = SlideID,fill=SlideID)) +
+        ggtitle('Simple2 adjustment')  +
+        theme_minimal() +
+        theme(legend.position = "none") +
+        xlim(c(0,10))
+
+
+ggplot(cb_atl) +
+        geom_density_ridges(aes(x=get(modal_vars[grepl(marker,modal_vars)]), y = SlideID,fill=SlideID)) +
+        ggtitle('Simple modal adjustment')  +
+        theme_minimal() +
+        theme(legend.position = "none")
+
+ggplot(cb_atl) +
+        geom_density_ridges(aes(x=get(modal_vars_zeroes_removed[grepl(marker,modal_vars_zeroes_removed)]), y = SlideID,fill=SlideID)) +
+        ggtitle('Simple modal adjustment (zeroes removed)')  +
+        theme_minimal() +
+        theme(legend.position = "none")
+```
+
+## `registr`
+```{r, warning=FALSE,message=FALSE}
+## registr
+registr_data = data.frame()
+for(s in unique(cb_atl$SlideID)){
+  dv = density(cb_atl[cb_atl$SlideID == s,
+                      'Median_Cell_VIMENTIN_log10'])
+  one_slide = data.frame(dv$x,dv$y)
+  one_slide$slide = s
+  registr_data = rbind(registr_data,one_slide)
+}
+colnames(registr_data) = c("index","value","id")
+
+
+## Kt=7, Kh=3: 589
+## Kt=8, Kh=5: 560
+## Kt=9, Kh=4: 539
+## Kt=10, Kh=5: 519
+## Kt=11, Kh=4: 314
+## Kt=12, Kh=5: 305
+
+registr_bin1 = register_fpca(Y = registr_data,
+                            family = "gaussian")
+registr_bin2 = register_fpca(Y = registr_data,
+                            family = "gaussian",
+                            Kt = 9,
+                            Kh = 4,
+                            npc = 1)
+registr_bin3 = register_fpca(Y = registr_data,
+                            family = "gaussian",
+                            Kt = 12,
+                            Kh = 5,
+                            npc = 1)
+
+## remove the zeroes
+
+## log10 data
+ggplot(registr_data) +
+  geom_line(aes(x=index,y=value,color=id)) +
+  theme(legend.position = "None")
+
+## Modal adjustment
+ggplot(cb_atl) + 
+  geom_density(aes(x=Median_Cell_VIMENTIN_log10_modal_adjusted_zeroes_removed,color=SlideID)) +
+  theme(legend.position = "None")
+
+registr_adj_data1 = registr_bin1$fpca_obj$Yhat
+ggplot(registr_adj_data1) +
+  geom_line(aes(x=index,y=value,color=id)) +
+  theme(legend.position = "None")
+
+registr_adj_data2 = registr_bin2$fpca_obj$Yhat
+ggplot(registr_adj_data2) +
+  geom_line(aes(x=index,y=value,color=id)) +
+  theme(legend.position = "None")
+
+registr_adj_data3 = registr_bin3$fpca_obj$Yhat
+ggplot(registr_adj_data3) +
+  geom_line(aes(x=index,y=value,color=id)) +
+  theme(legend.position = "None")
+```
+
+
+## In log-transformed space
+
+- E.g. the intensities are plotted using the log-transformed Median_Cell intensities.
+
+```{r log-transformed}
+for(c in all_clus){
+ gc1 = ggpairs(plot_atl_raw,
+        columns=4:6,
+        lower=list(continuous = wrap("points",alpha=0.25)),
+        ggplot2::aes(color=get(c)),
+        title = paste0(c," in log-transformed space")) +
+        theme_minimal()
+ print(gc1)
+}
+```
+
+## Confusion matrices
+
+- Using the clusters within slide on the $log_{10}$ scale as the "reference"/ground truth.
+
+```{r cmats}
+for(c in all_clus[-3]){
+        ## truth: within slide, prediction: across slide
+        cmat1 = confusionMatrix(data = as.data.frame(cb_atl)[,c],
+                                reference = cb_atl$cluster_within_slide_log)
+        
+        print("---------------------------------")
+        print("---------------------------------")
+        print("---------------------------------")
+        print(paste0(c," compared to cluster_within_slide_log"))
+        print(cmat1)
+}
+```
+
+## What now?
+- Pursuing an "alignment" approach that implements cost functions to combine the modal and simple adjustments
+        - Effectively tries to optimally align based on "control points" (e.g. min, max, modes, local minima)
+- Retooling the "slide only" ComBat -- results don't make sense
+- Computer vision?

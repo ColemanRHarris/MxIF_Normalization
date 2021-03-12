@@ -1,0 +1,516 @@
+---
+title: "spatial_analysis"
+author: "Simon Vandekar"
+date: "10/26/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+library(mclust)
+library(Rtsne)
+library(parallel)
+library(RColorBrewer)
+
+source('R/hierarchical_clustering.R')
+
+knitr::knit_hooks$set(GPs=function(before, options, envir){
+  if (before){
+    cex=1.5
+    par(mgp=c(1.7,.7,0), lwd=1.5, lend=2,
+        cex.lab=0.8*cex, cex.axis=0.8*cex, cex.main=1*cex,
+        mar=c(2.8,1.8,1.8,0), bty='l', oma=c(0,0,2,0))}
+})
+knitr::opts_chunk$set(echo = TRUE, fig.height = 4, fig.width = 4, GPs=TRUE, cache=TRUE, cache.lazy = FALSE)
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+cols = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+colscale = c('#f0f9e8', '#ccebc5', '#a8ddb5','#7bccc4','#4eb3d3', '#2b8cbe', '#08589e')
+set.seed(1234)
+
+ncores=40
+```
+
+## Data processing
+
+```{r, loadData}
+datafile = 'colon map batch 1 and 2 position corrected.rds'
+atl = readRDS(datafile)
+cellvars = grep('Median_Cell', names(atl), value=TRUE)
+# subset out these markers that did not have
+cellvars = cellvars[ - which(cellvars %in% c('Median_Cell_CD45B', 'Median_Cell_GACTIN', 'Median_Cell_PDL1', 'Median_Cell_CD45') )]
+# log transform
+temp = atl[,cellvars]
+temp[which(atl[,cellvars]  < 0)] = 0
+
+### COMMENTED OUT TO NOT TRANSFORM THE DATA
+atl[,cellvars] = log10(temp+1)
+rm(temp)
+# screen out duplicates due to FOV overlap. Eliot did this with later versions of the data, still some duplicates.
+atl = atl[ which(!duplicated(atl[,cellvars])),]
+slideIDs = unique(atl$SlideID)
+
+# normalize the data by slide
+cellvarsMeans = apply(atl[,cellvars], 2, function(x) mean(x[x>0]))
+atl = do.call(rbind, by(atl, atl$SlideID, function(data){
+  zeroInds = (data[,cellvars]==0)
+  datacellvarsMeans = apply(data[,cellvars], 2, function(x) mean(x[x>0]) )
+  datacellvarsSDs = apply(data[,cellvars], 2, function(x) sd(x[x>0]) )
+  res = scale(data[,cellvars], center = datacellvarsMeans-cellvarsMeans, scale=FALSE)
+  res[zeroInds] = 0
+  data[,cellvars] = res
+  data
+}) )
+```
+
+
+```{r, functions, eval=TRUE}
+
+EBupdate = function(l1s, G=3){
+  
+  # get level 1 parameters
+  #Gzs = sapply(l1s, function(x) x$G)
+  #nzs = lapply(l1s, function(x) colSums(x$z))
+  # for indexing the elements from the l2 clustering
+  Gzs = c(0,sapply(l1s, function(x) x$G))
+  nl1s = length(l1s)
+  
+  
+  params = do.call(rbind, lapply(l1s, function(x) t(x$parameters$mean)))
+  # fit second level model
+  l2 = Mclust(params, G=G)
+  # probabilities from l2 model
+  pzs=lapply(1:nl1s, function(l1ind) l2$z[(sum(Gzs[1:l1ind])+1):sum(Gzs[1:(l1ind+1)]),] )
+  
+  # higher cluster labels
+  labels = lapply(pzs, function(x) apply(x, 1, which.max) )
+  
+  #Gz = l2$G
+  
+  # for testing
+  # l1 = l1s[[1]]; Gz = Gzs[[1]]; pz=pzs[[1]]
+  l1s = mapply(function(l1, pz, label){
+    l1$parameters$mean = EBmean(mu=l1$parameters$mean,
+                                sigma = l1$parameters$variance$sigma,
+                                mu0 = l2$parameters$mean,
+                                sigma0=l2$parameters$variance$sigma,
+                                pz=pz, ns = colSums(l1$z))
+    l1$l2labels = label
+    l1$l2pz = pz
+    ans = list(l1) }, l1=l1s, pz=pzs, label=labels)
+  ans = list(l1s=l1s, l2=l2)
+}
+
+# sigma should be an array
+# sigma is array of variances for l1
+# sigma0 is array of variances for l2
+# pz is probability of
+EBmean = function(mu, sigma, mu0, sigma0, pz, ns){
+  ans = do.call(cbind, lapply(1:dim(sigma)[3], function(ind){
+    sig = sigma[,,ind]/ns[ind]
+    mu0s = sapply(1:dim(sigma0)[3], function(ind0){
+      invmat = solve(sig + sigma0[,,ind0])
+      sig %*% invmat %*% mu0[,ind0] + sigma0[,,ind0] %*% invmat %*% mu[,ind]
+    })
+    ans = mu0s %*% pz[ind,]
+  }))
+}
+
+```
+
+
+## Data descriptives
+
+### Histograms
+```{r, histograms, fig.width=15, fig.height=18}
+transpcols = col2rgb(cols)
+transpcols = rgb(transpcols[1,], transpcols[2,], transpcols[3,], maxColorValue = 255, alpha = 127)
+layout(matrix(1:30, nrow=6, byrow=TRUE))
+#layout(matrix(1:8, nrow=2, byrow=TRUE))
+invisible(sapply(cellvars,
+               function(cellvar){
+                 histinfo = hist(atl[,cellvar], plot=FALSE)
+                 hist(atl[atl$SlideID==slideIDs[1],cellvar], breaks=histinfo$breaks, col=transpcols[1], border=NA, main=cellvar, xlab=cellvar, probability = TRUE, ylim=c(0,3)) #main=slideIDs[1]
+                 sapply(2:length(slideIDs), function(ind){
+                   hist(atl[ atl$SlideID==slideIDs[ind],cellvar], breaks = histinfo$breaks, border=NA, probability=TRUE, col=transpcols[ind], main=slideIDs[ind], xlab=cellvar, add=TRUE)
+                 } )
+                 #mtext(cellvar, outer = TRUE, cex=1.5 )
+                 #dev.off()
+               }))
+```
+
+
+### PCA
+```{r, PCA}
+# PCA components
+scelldata = scale(atl[,cellvars])
+varcomps = svd(scelldata, nu=0, nv=0)$d
+varcomps = varcomps^2/sum(varcomps^2)
+plot(1:length(varcomps), cumsum(varcomps), xlab='Component number', ylab='Proportion of variance', type='l')
+```
+
+
+### Hierarchical clustering of the markers
+```{r hclust, fig.width=6, fig.height=6, eval=FALSE}
+celldist <- dist(t(scelldata), method = "euclidean")
+# Hierarchical clustering using Complete Linkage
+hclustcell <- hclust(celldist, method = "complete" )
+# Plot the obtained dendrogram
+plot(hclustcell, hang = -1)
+# get three clusters marker membership
+members = cutree(hclustcell, k=3)
+```
+
+
+
+## Clustering
+
+I've run clustering three ways:
+
+1. Marginal clustering using naive bayes.
+2. Adhoc marginal hierarchical clustering using naive Bayes. First cluster epithelium or stroma, then further categorize into cell type marginally based on known marker levels (high/low).
+3. Multivariate clustering. Possibly better defined clusters, but no labels for the clusters.
+
+Options 1 and 2 are implemented adhoc using a naive Bayes approach by averaging probabilities when multiple markers are passed. The second level of clustering is estimated only on the cells that were identified in the higher level. I used a probability threshold of .80 to select cells for building the 2nd level model. Ideally, this would instead be a weighted clustering where the weights are proportional to the cell class probabilities from the higher level.
+For the first two options, zeros are removed before fitting the model and then the cells with zero values are assigned to the class with the smaller mean.
+The code is not exported as a package, but could be. The function takes a `markers` data frame that contains the clustering structure.
+Another potential improvement would be to use multivariate clustering when multiple markers are chosen for a given cell identifier.
+This would require a more complicated decision about what latent mixture class is identified as the "expressed" class.
+
+**Variables to change settings for the clustering are specified in this section**.
+
+Here are the tables used to define the marginal clustering labels:
+
+```{r clusteringParameters}
+# Mclust parameters
+G = 10
+# Combined clustering G
+Gcomb = 20
+# possible models. mclust.options("emModelNames")
+model='VVI' # diagonal, varying volume and shape
+prior=priorControl()
+Gs = seq(5, 30, by=5)
+prior=priorControl()
+# sample this amount for testing. Set less than 1 to not sample
+nsamp = 10000
+nit = 5
+
+# to assign labels
+markers = data.frame(cl1=rep(c('epithelium', 'stroma'), c(5,5)),
+                     cl2=c('goblet', 'tuft', 'enteroendocrine', 'stem', 'tumor', 'cytotoxicT', 'helperT', 'regulatoryT', 'B', 'Macrophages'))
+
+### SETUP CLUSTERING PARAMETERS FOR NAIVE BAYES
+markers$cl1markers = rep(list(c('VIMENTIN', 'PANCK', 'NAKATPASE'), c('VIMENTIN', 'PANCK', 'NAKATPASE')), c(5,5))
+markers$cl1markerValue=rep(list( c(1, 2, 2), c(2,1,1)), c(5,5) )
+markers$cl2markers = list('MUC2', c('PSTAT3', 'PEGFR'), 'CGA', 'SOX9', 'BCATENIN', c('CD8', 'CD3D'), c('CD4', 'CD3D'), c('FOXP3', 'CD3D'), 'CD20', 'CD68')
+markers$cl2markerValue=list(2,c(2,2),2,2,2, c(2,2), c(2,2), c(2,2), 2,2)
+markers2 = markers1 =  markers
+markers2$cl1 = markers2$cl2
+markers2$cl1markers = lapply(1:nrow(markers2), function(x) c(markers2$cl1markers[[x]], markers2$cl2markers[[x]]) )
+markers2$cl1markerValue = lapply(1:nrow(markers2), function(x) c(markers2$cl1markerValue[[x]], markers2$cl2markerValue[[x]]) )
+markers2[, grep('cl2', names(markers2))] = NULL
+
+
+### SETUP DATA FOR EACH SLIDE
+slidedatas = lapply(slideIDs, function(slideID){
+  slidedata = atl[ atl$SlideID==slideID , c('ID', 'Pos', 'TissueID', 'region', 'epi', 'TissueType', 'SlideID', 'x', 'y', cellvars)]
+  if(nsamp>0 & nsamp<nrow(slidedata)){
+    slidedata = slidedata[ sample(nrow(slidedata), nsamp),]
+  }
+  slidedata})
+names(slidedatas) = slideIDs
+
+
+knitr::kable(markers1, caption = 'label1 cluster hierarchy.')
+knitr::kable(markers2, caption = 'label2 cluster hierarchy.')
+```
+
+
+### Run Rtsne
+
+```{r tsne}
+slidedatas = mclapply(slidedatas, function(x){ x[, c('tsne_x', 'tsne_y')] = Rtsne(x[,cellvars])$Y[,1:2]; x }, mc.cores=ncores)
+#slidedata = atl[atl$SlideID == slideID , cellvars]
+#tsne = Rtsne(slidedata)
+#s1clust = Mclust(slidedata, G=seq(5, 60, by=5), modelNames = model, prior=prior)
+#plot(tsne$Y[,1], tsne$Y[,2], pch=20, col=rep(cols, 5)[s1clust$classification])
+#tsneresults = paste0('tsne_results_nsamp', nsamp, '.rdata')
+#save.image(tsneresults)
+```
+
+
+### BIC for models
+Compares BIC across a range of cluster sizes specified at the beginning of this section.
+```{r BIC, eval=FALSE}
+BICs = mclapply(slidedatas, function(slidedata) mclustBIC(slidedata[,-1], G=Gs, modelNames = model, prior = prior), mc.cores=ncores )
+BICs = lapply(BICs, function(bic){ ans = (bic-min(bic)); ans=ans/max(ans) })
+plot(Gs, c(BICs[[1]]), col=cols[1], type='b', main='BIC', xlab='nclust', ylab='scaled BIC')
+invisible(lapply(2:length(BICs), function(ind) points(Gs, BICs[[ind]], col=cols[ind], type='b')))
+```
+
+
+
+### Run Multivariate Gaussian mixture clustering in each slide
+
+Fits the multivariate clustering model for each slide.
+
+```{r mixtureModels, results='hide', eval=TRUE}
+mcl = list()
+for(slideID in slideIDs){
+  slidedata = slidedatas[[slideID]]
+  invisible(capture.output(mcl[[slideID]] <- Mclust(slidedata[,cellvars], G=G, prior=prior, modelNames = model)))
+  # delete to save memory
+  #mcl[[slideID]]$data = NULL
+  #mcl[[slideID]]$z = NULL
+}
+
+# prior only works with a single mean vector I think
+#prior = priorControl(mean=l2$parameters$mean, modelname=model)
+# EB shrinkage
+# mclshrink = EBupdate(mcl, G=G)
+# l2 = mclshrink[[2]]
+# mclshrink = mclshrink[[1]]
+# for(it in 1:nit){
+#   mclshrink = EBupdate(mclshrink, G=G)
+#   l2 = mclshrink[[2]]
+#   mclshrink = mclshrink[[1]]
+# }
+# mcl = mapply(function(x, y){x$l2labels = y$l2labels; list(x)}, x=mcl, y=mclshrink)
+```
+
+
+### Run marginal clustering in each slide
+
+This section fits the marginal clustering models that are coded by the tables `markers1` and `markers2`
+
+```{r marginalMixture, message=FALSE, results='hide'}
+#load(tsneresults)
+
+for(markname in c('markers1', 'markers2')){
+  markers = get(markname)
+  
+  slidedatas = mclapply(slidedatas, function(data){ ans=HCnaive(slidedata=data, markers=markers); ans$data[,colnames(ans$z)] = ans$z; ans$data}, mc.cores = ncores )
+#debug(HCnaive)
+#test = HCnaive(slidedata=slidedatas[[1]], markers=markers1)
+  
+  if(markname=='markers1') slidedatas = lapply(slidedatas, function(slide){ slide[,paste0('marg_cl2_', markers$cl2)] = slide[,paste0('cl1_', markers$cl1)] * slide[, paste0('cl2_', markers$cl2)]; slide })
+}
+```
+
+```{r writeoutLabels, eval=FALSE}
+outdata = as.data.frame(do.call(rbind, slidedatas))
+outdata$cell_label = ifelse(outdata$cl1_stroma>0.9, 'stroma', 'epithelium')
+saveRDS(outdata, file='sc_data_for_ruby.rdata')
+rm(outdata)
+```
+
+
+
+
+### Plot clustering results
+
+```{r, fig.height=8, fig.width=8}
+invisible(lapply(slidedatas, function(slidedata){
+  plot(slidedata[ slidedata$cl1_stroma>0.8, paste0('cl2_', markers1$cl2[markers1$cl1=='stroma'])], main=slidedata$SlideID[1])
+  plot(slidedata[ slidedata$cl1_stroma>0.8, paste0('Median_Cell_', sapply(markers1$cl2markers[markers1$cl1=='stroma'], function(x) x[1]))], main=slidedata$SlideID[1])
+  } ))
+
+```
+
+
+```{r createLabels}
+
+for(slideID in slideIDs){
+  slidedata = slidedatas[[slideID]]
+  clust = mcl[[slideID]]
+  slidedata$mlabel = predict.Mclust(clust, newdata=slidedata[,cellvars])$classification
+  nams = grep('marg_cl2', names(slidedata), value=TRUE)
+  slidedata$label = as.factor(apply(slidedata[,nams], 1, function(x) nams[which.max(x)] ))
+  nams2 = paste0('cl1_', markers2$cl1)
+  slidedata$label2 = as.factor(apply(slidedata[,nams2], 1, function(x) nams2[which.max(x)] ))
+  slidedatas[[slideID]] = slidedata
+}
+```
+
+
+```{r, individualClusters, fig.width=10, fig.height=27.5, eval=FALSE}
+
+#save.image('/media/disk2/atlas_mxif/clust_data.rdata')
+#load('/media/disk2/atlas_mxif/clust_data.rdata')
+for(slideID in slideIDs){
+  slidedata = slidedatas[[slideID]]
+  clust = mcl[[slideID]]
+  l1proportions = colSums(clust$z)/sum(clust$z)
+  mu = clust$parameters$mean
+  rownames(mu) = cellvars
+  layout(matrix(1:44, nrow=11, byrow=TRUE))
+  plot(slidedata$tsne_x, slidedata$tsne_y, ylab='tsne 2', xlab='tsne 1', col=cols[slidedata$mlabel], main='Multivariate classes')
+  plot(1,1, xlim=c(0,1), ylim=c(0,1), axes = FALSE, type='n', xlab='', ylab='') 
+  barplot(l1proportions, col=cols, las=2, main='Class proportions')
+  ## empty plots to finish the row
+  plot(1,1, xlim=c(0,1), ylim=c(0,1), axes = FALSE, type='n', xlab='', ylab='') 
+  
+  markervals = paste0('Median_Cell_', unique(unlist(markers2$cl1markers)))
+  
+  invisible(sapply(c('epi', 'cl1_epithelium', 'label', 'label2', markervals), function(x){ if(is.numeric(slidedata[,x]) & length(table(slidedata[,x]))>12){
+    cols=brewer.pal(11, 'Spectral')
+    slidedata[,x] = cut(slidedata[,x], 11)
+  } else {
+    cols=brewer.pal(12, 'Set3')
+    slidedata[,x] = as.factor(slidedata[,x])
+  }
+    plot(slidedata$tsne_x, slidedata$tsne_y, ylab='tsne 2', xlab='tsne 1', main=x, col=cols[ as.numeric(slidedata[,x]) ])
+    plot(1,1, xlim=c(0,1), ylim=c(0,1), axes = FALSE, type='n', xlab='', ylab='')
+    legend('bottomleft', legend=levels(slidedata[,x]), fill=cols[ 1:nlevels(slidedata[,x]) ])}) )
+  mtext(slideID, outer=TRUE, cex=1.5)
+  #transpcols = col2rgb(cols)
+  #transpcols = rgb(transpcols[1,], transpcols[2,], transpcols[3,], maxColorValue = 255, alpha = 127)
+  # layout(matrix(1:30, nrow=6, byrow=TRUE))
+  # #layout(matrix(1:8, nrow=2, byrow=TRUE))
+  # trash = sapply(cellvars,
+  #                function(cellvar){
+  #                  histinfo = hist(atl[,cellvar], plot=FALSE)
+  #                  hist(atl[atl$SlideID==slideID,cellvar], breaks=histinfo$breaks, col=transpcols[1], border=NA, main=cellvar, xlab=cellvar, probability = TRUE, ylim=c(0,3))
+  #                    text(1:G, y=rep(3, G), x=mu[cellvar,])
+  #                  } )
+  # barplot(l1proportions, col=cols, las=2)
+}
+```
+
+
+
+
+```{r, fig.width=12, fig.height=4, eval=TRUE}
+slidedata = slidedatas[[1]]
+sldt = slidedata[ slidedata$TissueID == slidedata$TissueID[1] & slidedata$region==slidedata$region[1], ]
+layout(matrix(1:3, nrow=1))
+invisible(lapply(slidedatas, function(slidedata, columns){
+  by(slidedata, slidedata[,c('TissueID', 'region')], function(sldt){
+    slideID = sldt[1,'SlideID']
+    tissueID = sldt[1,'TissueID']
+    region = sldt[1,'region']
+    sapply(columns, function(x){ if(is.numeric(sldt[,x]) & length(table(sldt[,x]))>12){
+      cols=brewer.pal(11, 'Spectral')
+      sldt[,x] = cut(sldt[,x], 11)
+    } else {
+      cols=brewer.pal(12, 'Set3')
+      sldt[,x] = as.factor(sldt[,x])
+    }
+      plot(sldt$x, sldt$y, ylab='y', xlab='x', main=x, col=cols[ as.numeric(sldt[,x]) ], cex=1.5)
+      legend('bottomleft', legend=levels(sldt[,x]), fill=cols[ 1:nlevels(sldt[,x]) ])}) 
+    mtext(paste(slideID, tissueID, region), outer=TRUE, cex=1.5)
+  })
+}, columns=c('mlabel', 'label', 'label2')) )
+```
+
+
+```{r, clusterMeans, fig.width=15, fig.height=18, eval=FALSE}
+#load('/media/disk2/atlas_mxif/l2clust_data.rdata')
+for(ind0 in 1:G){
+  mu = l2$parameters$mean[,ind0]
+  l1counts = sapply(mclshrink, function(x) sum(x$l2labels==ind0))
+  #l1counts = sapply(mclshrink, function(x) sum(x$z[,x$l2labels==ind0]) )
+  l1musShrink = do.call(cbind, lapply(mclshrink, function(x) x$parameters$mean[,which(x$l2labels==ind0)] ))
+  l1mus = do.call(cbind, lapply(mcl, function(x) x$parameters$mean[,which(x$l2labels==ind0)] ))
+  rownames(l1musShrink) = rownames(l1mus) = names(mu) = cellvars
+  transpcols = col2rgb(cols)
+  transpcols = rgb(transpcols[1,], transpcols[2,], transpcols[3,], maxColorValue = 255, alpha = 127)
+  layout(matrix(1:30, nrow=6, byrow=TRUE))
+  #layout(matrix(1:8, nrow=2, byrow=TRUE))
+  invisible(sapply(cellvars,
+                 function(cellvar){
+                   histinfo = hist(atl[,cellvar], plot=FALSE)
+                   hist(atl[atl$SlideID==slideIDs[1],cellvar], breaks=histinfo$breaks, col=transpcols[1], border=NA, main=cellvar, xlab=cellvar, probability = TRUE, ylim=c(0,3)) #main=slideIDs[1]
+                     sapply(2:length(slideIDs), function(ind){
+                     hist(atl[ atl$SlideID==slideIDs[ind],cellvar], breaks = histinfo$breaks, border=NA, probability=TRUE, col=transpcols[ind], main=slideIDs[ind], xlab=cellvar, add=TRUE)
+                     points(y=3, x=mu[cellvar], pch=25)
+                     points(y=rep(2.5, length(l1mus[cellvar,])), x=l1mus[cellvar,], pch=25, col=rep(cols, length.out=length(l1mus[cellvar,])))
+                     points(y=rep(2.75, length(l1musShrink[cellvar,])), x=l1musShrink[cellvar,], pch=25, col=rep(cols, length.out=length(l1musShrink[cellvar,])))
+                   } )
+                   #dev.off()
+                 }))
+  barplot(l1counts, col=cols, las=2)
+  mtext(paste('Cluster', ind0), outer = TRUE, cex=1.5 )
+}
+```
+
+
+### Gaussian clustering with full data set
+
+```{r combinedClustering, eval=FALSE}
+# Mclust parameters set above
+
+combData = do.call(rbind, slidedatas)
+Gs = seq(5, 30, by=5)
+BIC = mclustBIC(combData[,cellvars], G=Gs, modelNames = model, prior = prior)
+plot(BIC)
+combClust = Mclust(combData[,cellvars], G=Gcomb, prior=prior, modelNames = model)
+tsneComb = Rtsne(combData[,cellvars])
+```
+
+Plot clustering results
+
+```{r, combinedClusterMeans, fig.width=15, fig.height=18, eval=FALSE}
+#save.image('/media/disk2/atlas_mxif/clust_data.rdata')
+#load('/media/disk2/atlas_mxif/l2clust_data.rdata')
+plot(tsneComb$Y[,1], tsneComb$Y[,2], ylab='tsne 2', xlab='tsne 1', col=cols[as.numeric(as.factor(combData$SlideID))], main='slideID')
+plot(tsneComb$Y[,1], tsneComb$Y[,2], ylab='tsne 2', xlab='tsne 1', col=cols[combClust$classification], main='clusterID')
+legend('bottomright', fill=cols[1:Gcomb], legend=1:Gcomb)
+mu = combClust$parameters$mean
+rownames(mu) = cellvars
+transpcols = col2rgb(cols)
+transpcols = rgb(transpcols[1,], transpcols[2,], transpcols[3,], maxColorValue = 255, alpha = 127)
+layout(matrix(1:30, nrow=6, byrow=TRUE))
+#layout(matrix(1:8, nrow=2, byrow=TRUE))
+invisible(sapply(cellvars,
+               function(cellvar){
+                 histinfo = hist(atl[,cellvar], plot=FALSE)
+                 hist(atl[atl$SlideID==slideIDs[1],cellvar], breaks=histinfo$breaks, col=transpcols[1], border=NA, main=cellvar, xlab=cellvar, probability = TRUE, ylim=c(0,3)) #main=slideIDs[1]
+                   sapply(2:length(slideIDs), function(ind){
+                   hist(atl[ atl$SlideID==slideIDs[ind],cellvar], breaks = histinfo$breaks, border=NA, probability=TRUE, col=transpcols[ind], main=slideIDs[ind], xlab=cellvar, add=TRUE)
+                   text(labels = 1:Gcomb, y=3-seq(0, 1, length.out=Gcomb), x=mu[cellvar,], pch=25)
+                 } )
+                 #dev.off()
+               }))
+```
+
+```{r slideProportionPlots, fig.width=15, fig.height=20, eval=FALSE}
+par(mar=c(15,1.8,1.8,0) )
+layout(matrix(1:Gcomb, ncol=5, byrow=TRUE))
+for(ind0 in 1:Gcomb){
+  l1counts = c(by(combClust$z[,ind0], combData$SlideID, sum))/sum(combClust$z[,ind0])
+  l1proportions = by(combClust$z, combData$SlideID, function(x) sum(x[,ind0])/sum(x))
+  barplot(l1counts, col=cols, las=2, main=paste('Cluster', ind0))
+  #barplot(l1proportions, col=cols, las=2)
+  #mtext(, outer = TRUE, cex=1.5 )
+}
+```
+
+
+```{r meansPlot, fig.width=15, fig.height=20, eval=FALSE}
+
+par(mar=c(15,1.8,1.8,0) )
+layout(matrix(1:Gcomb, ncol=5, byrow=TRUE))
+for(ind0 in 1:Gcomb){
+  barplot(combClust$parameters$mean[,ind0], col=cols, las=2, main=paste('Cluster', ind0))
+}
+```
+
+```{r, fig.width=8, fig.height=4, eval=FALSE}
+for(ind0 in 1:Gcomb){
+  l1clusters = lapply(mclshrink, function(x) which(x$l2labels==ind0) )
+  nplots = sapply(l1clusters, length)
+  nr = max(nplots)+1
+  mat = matrix(NA, nrow=nr, ncol=length(l1clusters))
+  mat[1,] = 1
+  
+  #for(i in 1:length(nplots)){
+  # mat[i,2:nplots[i]] = (1):nplots[i]+1
+  #}
+  #layout(rep(1, length(mclshrink)), nrow=nr)
+  barplot(l2$parameters$mean[,ind0], main=paste0('Cluster ', ind0), las=2, names.arg = gsub('Median_Cell_', '', cellvars) )
+  invisible(lapply(1:length(l1clusters), function(ind) sapply(l1clusters[[ind]], function(pind) barplot(mcl[[ind]]$parameter$mean[,pind], main=paste(names(l1clusters)[ind], pind), las=2, names.arg = gsub('Median_Cell_', '', cellvars)) ) ))
+}
+
+```
+

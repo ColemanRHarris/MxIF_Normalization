@@ -1,0 +1,281 @@
+---
+title: "Other Clustering Metrics"
+author: "Coleman Harris"
+output: html_document
+---
+```{r setup, message=FALSE, warning=FALSE}
+require(ggplot2)
+require(caret)
+cb_atl = readRDS("~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method10_0301/atl_with_fda_210302.rds")
+dat = load('/home/vandeks/troubleshooting_20210312.rdata')
+```
+
+## Otsu thresholding
+
+```{r otsu, fig.width = 10}
+## based on EBImage::otsu()
+get_otsu = function(y, breaks=1024){
+  h = hist.default(y, breaks = breaks, plot = FALSE)
+  counts = as.double(h$counts)
+  mids = as.double(h$mids)
+  len = length(counts)
+  w1 = cumsum(counts)
+  w2 = w1[len] + counts - w1
+  cm = counts * mids
+  m1 = cumsum(cm)
+  m2 = m1[len] + cm - m1
+  var = w1 * w2 * (m2/w2 - m1/w1)^2
+  # find the left- and right-most maximum and return the threshold value in between
+  maxi = which(var == max(var, na.rm = TRUE))
+  (mids[maxi[1]] + mids[maxi[length(maxi)]] ) /2
+}
+
+base_channels = paste0('Median_Cell_',c('VIMENTIN','PANCK','NAKATPASE'))
+log_channels = paste0(base_channels,'_log10')
+fda1_channels = paste0(log_channels, '_fda_registered1')
+#fda5_channels = paste0(log_channels, '_fda_registered5')
+#fda10_channels = paste0(log_channels, '_fda_registered10')
+
+## split data into slides
+slides = split(cb_atl,factor(cb_atl$SlideID))
+
+## setup otsu data
+otsus = data.frame()
+
+for(s in slides){
+  ## split data by channel
+  for(i in 1:length(base_channels)){
+    
+    ## get values
+    otsus = rbind(c(unique(s$SlideID),
+                    base_channels[i],
+                    get_otsu(y = s[,log_channels[i]]), ## collect otsu for log10
+                    get_otsu(y = s[,fda1_channels[i]]),## collect otsu for fda1
+                    get_otsu(y = s[,fda5_channels[i]]),## collect otsu for fda5
+                    get_otsu(y = s[,fda10_channels[i]])## collect otsu for fda10
+                    ),
+                  otsus)
+  }
+}
+colnames(otsus) = c('SlideID','channel','log10_threshold',
+                    'fda1_threshold','fda5_threshold','fda10_threshold')
+otsus$log10_threshold = as.numeric(otsus$log10_threshold)
+otsus$fda1_threshold = as.numeric(otsus$fda1_threshold)
+otsus$fda5_threshold = as.numeric(otsus$fda5_threshold)
+otsus$fda10_threshold = as.numeric(otsus$fda10_threshold)
+
+## plot x: SlideID, y: otsu threshod, color: normalization method, for each channel
+ggplot(otsus) +
+  geom_point(aes(x=SlideID, y = log10_threshold,color="log10")) +
+  geom_point(aes(x=SlideID, y = fda1_threshold,color="fda1")) +
+  #geom_point(aes(x=SlideID, y = fda5_threshold,color="fda5")) +
+  #geom_point(aes(x=SlideID, y = fda10_threshold),color='yellow') +
+  facet_wrap(~channel) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+## troubleshooting 2021-03-12
+```{r}
+## otsu for untransformed
+log10thresholds = apply(cb_atl[,log_channels], 2, get_otsu)
+## otsu for transformed
+fda1thresholds = apply(cb_atl[,fda1_channels], 2, get_otsu)
+## otsu for simple
+simple1thresholds = apply(cb_atl[,paste0(base_channels[-4], "_simple_adjusted")], 2, get_otsu)
+
+## SDs for thresolds
+by(otsus[,c(3:4)],otsus$channel, function(x) apply(x,2,sd))
+
+## convert otsus df into long format
+otsuLong = reshape(otsus, direction='wide', v.names=c('log10_threshold', 'fda1_threshold'), timevar = 'channel', idvar='SlideID', sep='_')
+
+## log10 MSEs from Otsu applied to full dataset
+colMeans(sweep(otsuLong[,rev(grep('log10_threshold',names(otsuLong),value=TRUE))], 2, log10thresholds,FUN="-")^2)
+
+## fda MSEs from Otsu applied to full dataset
+colMeans(sweep(otsuLong[,rev(grep('fda1_threshold',names(otsuLong),value=TRUE))], 2, fda1thresholds,FUN="-")^2)
+
+## function to apply threshold
+checkThreshold = function(vec,thr=0){
+  tab = as.data.frame(outer(vec,thr,FUN=">")) %>% table()
+  return(tab/sum(tab) * (1-diag(2)))
+}
+
+## apply otsu threshold (log10)
+var = 'Median_Cell_PANCK' ## channel
+s = slides[[1]] ## slide
+vec = s[,paste0(var,'_log10')] ## log10 data
+thr1 = log10thresholds[grep(var,names(log10thresholds))] 
+thr2 = otsus[otsus$SlideID==unique(s$SlideID) & otsus$channel==var,'log10_threshold']
+
+checkThreshold(vec,c(thr1,thr2))
+
+## apply otsu threshold (fda)
+vec = s[,paste0(var,'_log10_fda_registered1')] ## log10 data
+thr1 = fda1thresholds[grep(var,names(fda1thresholds))] 
+thr2 = otsus[otsus$SlideID==unique(s$SlideID) & otsus$channel==var,'fda1_threshold']
+
+var = 'Median_Cell_NAKATPASE' ## channel
+log10checks= c()
+fda1checks = c()
+for(s in slides){
+  ## get values for log10
+  vec = s[,paste0(var,'_log10')] ## log10 data
+  thr1 = log10thresholds[grep(var,names(log10thresholds))] 
+  thr2 = otsus[otsus$SlideID==unique(s$SlideID) & otsus$channel==var,'log10_threshold']
+  
+  ## add percent misclassified
+  log10checks = c(log10checks,sum(checkThreshold(vec,c(thr1,thr2))))
+  
+  ## get values for fda
+  vec = s[,paste0(var,'_log10_fda_registered1')] ## log10 data
+  thr1 = fda1thresholds[grep(var,names(fda1thresholds))] 
+  thr2 = otsus[otsus$SlideID==unique(s$SlideID) & otsus$channel==var,'fda1_threshold']
+  
+  ## add percent misclassified
+  fda1checks = c(fda1checks,sum(checkThreshold(vec,c(thr1,thr2))))
+}
+
+## percent of misclassification at the global level compared to slide level, when calculating otsu thresholds within each slide and across the full dataset
+## when data is registered, better alignment of slide-level otsu thresholds to the global parameter (all of the slides)
+
+mean(log10checks);mean(fda1checks)
+plot(log10checks,fda1checks)
+abline(a=0,b=1)
+```
+
+
+## Kmeans
+
+### Calculating clusters
+
+```{r kmeans}
+##set seed for the date
+seed_val = 210308
+
+kmeans_channels = c("Median_Cell_PANCK","Median_Cell_VIMENTIN","Median_Cell_NAKATPASE")
+kmeans_log10_channels = paste0(kmeans_channels,'_log10')
+kmeans_fda_channels = paste0(kmeans_log10_channels,'_fda_registered1')
+
+set.seed(seed_val) 
+across_slide_raw = kmeans(x = cb_atl[,kmeans_channels],centers=2)
+set.seed(seed_val) 
+across_slide_log10 = kmeans(x = cb_atl[,kmeans_log10_channels],centers = 2)
+set.seed(seed_val) 
+across_slide_fda1 = kmeans(x = cb_atl[,kmeans_fda_channels],centers = 2)
+
+# set.seed(seed_val) 
+# across_slide_fda5 = kmeans(x = cb_atl[,fda5_channels],centers = 2)
+
+## bronze standard
+# within_slide_log10 = c()
+for(i in 1:length(slides)){
+  set.seed(seed_val)
+  sub_clus = kmeans(slides[[i]][,kmeans_log10_channels], centers=2)
+  # within_slide_log10 = c(sub_clus$cluster, #get_class(s, sub_clus$cluster),
+  #                        within_slide_log10)
+  slides[[i]]$within_slide_log10 = sub_clus$cluster
+}
+```
+
+### Comparing results
+
+#### Across slide clustering with registered curves is 99% the same as across slide clustering on log10 data
+
+```{r}
+confusionMatrix(factor(across_slide_fda1$cluster),factor(across_slide_log10$cluster))
+```
+
+#### log10 across slides and fda registration yield similar results to bronze standard
+
+```{r}
+confusionMatrix(factor(across_slide_log10$cluster),factor(within_slide_log10))
+confusionMatrix(factor(across_slide_fda5$cluster), factor(within_slide_log10))
+```
+
+```{r}
+## function to correctly align classification
+get_class = function(dat,vec){
+  sub_dat = dat[vec == 1,]
+  mv = mean(sub_dat$Median_Cell_VIMENTIN)
+  mo = mean(unlist(sub_dat[,c('Median_Cell_NAKATPASE','Median_Cell_PANCK')]))
+  
+  if(mv > mo){
+    return(ifelse(vec==2,1,2))
+  }
+  return(vec)
+}
+
+kmeans_acc = function(v1,v2){
+  t1 = table(v1,v2)
+  t1 = t1/sum(t1)
+  e1 = sum(diag(t1))
+  e2 = sum(t1 * (1-diag(2)))
+  return(min(e1,e2))
+}
+
+
+kmeans_channels = c("Median_Cell_PANCK","Median_Cell_VIMENTIN","Median_Cell_NAKATPASE")
+kmeans_log10_channels = paste0(kmeans_channels,'_log10')
+kmeans_fda_channels = paste0(kmeans_log10_channels,'_fda_registered1')
+
+algo="Hartigan-Wong"
+set.seed(seed_val)
+cb_atl$kmeans_log10_clusters = kmeans(x = cb_atl[,kmeans_log10_channels],centers = 2,
+                                      algorithm=algo,iter.max=100,nstart = 50)$cluster
+set.seed(seed_val) 
+cb_atl$kmeans_fda_clusters = kmeans(x = cb_atl[,kmeans_fda_channels],centers = 2,
+                                    algorithm=algo,iter.max=100,nstart = 50)$cluster
+
+slides = split(cb_atl,factor(cb_atl$SlideID))
+log10_vals = c()
+fda_vals = c()
+
+for(s in slides){
+  ## compute bronze standard
+  set.seed(seed_val)
+  fit1 = kmeans(x = s[,kmeans_log10_channels], centers=2,algorithm=algo,iter.max=100,nstart = 50)
+  ref = factor(get_class(s,factor(fit1$cluster)))
+  
+  log10_acc = kmeans_acc(factor(s$kmeans_log10_clusters),
+                              ref)
+  fda_acc = kmeans_acc(factor(s$kmeans_fda_clusters),
+                       ref)
+  
+  # x = nrow(s)
+  # set.seed(seed_val)
+  # fit2 = kmeans(x = s[,kmeans_fda_channels], centers=2)
+  # 
+  # y1 = round(confusionMatrix(factor(get_class(s,factor(fit2$cluster))),
+  #                            factor(get_class(s,factor(fit1$cluster))))$overall['Accuracy'],4) ## expect >.99
+  # y2 = round(confusionMatrix(factor(get_class(s,factor(s$fda_clusters_test))),
+  #                            factor(get_class(s,factor(fit1$cluster))))$overall['Accuracy'],4) 
+  # y3 = round(confusionMatrix(factor(get_class(s,factor(s$across_clus_test))),
+  #                            factor(get_class(s,factor(fit1$cluster))))$overall['Accuracy'],4) 
+  # if(y1 < 0.1){y1 = 1-y1}
+  # if(y2 < 0.1){y2 = 1-y2}
+  
+  log10_vals = c(log10_vals,log10_acc)
+  fda_vals = c(fda_vals,fda_acc)
+  
+}
+mean(log10_vals)
+mean(fda_vals)
+
+colnames(acc_dat) = c('size','y1','y2','y3')
+
+## expect >.99
+ggplot(acc_dat) +
+  geom_point(aes(x=log10(size),y=y1))
+
+## 
+g1 = ggplot(acc_dat) +
+  geom_point(aes(x=log10(size),y=y2))
+
+g2 = ggplot(acc_dat) +
+  geom_point(aes(x=log10(size),y=y3))
+
+ggpubr::ggarrange(g1,g2)
+```
+

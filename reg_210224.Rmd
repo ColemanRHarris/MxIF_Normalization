@@ -1,0 +1,131 @@
+---
+title: "registration"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+require(fda)
+require(ggplot2)
+#cb_atl = readRDS("~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method9_0122/atl_with_all_methods_updated_0122.rds")
+cb_atl = readRDS("~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method9_0122/atl_with_fda_updates_210225.rds")
+cb_atl = cb_atl[,-c(188:192)]
+```
+
+## Function to register the data
+
+```{r}
+register_var = function(var, 
+                        normedVar,
+                        normedVariter = 1,
+                        len=512){
+  
+  ## ---- data setup
+  x = split(cb_atl,factor(cb_atl$SlideID)) ## split data by slide
+  rang = range(cb_atl[ which(cb_atl[,var]!=0),var]) ## get range of values != 0
+  #if(rang[1] < 0){rang[1] = 0}
+  argvals = seq(rang[1],rang[2],len=len) ## get evenly spaced values for computation later
+  
+  ## ---- density of var
+  densY = sapply(1:length(x), function(i){ ## calculate density for each nonzero value across slides
+    density(x[[i]][,var][which(x[[i]][,var]>0)],
+            from=rang[1],
+            to=rang[2],
+            n=len,
+            na.rm=TRUE)$y
+  })
+  
+  ## ---- setup basis functions
+  fdobj_basis = create.bspline.basis(rangeval = rang, norder = 4,nbasis=20+normedVariter) ## create bspline basis with cubic splines (approx hist)
+  wbasis = create.bspline.basis(rangeval = rang, norder = 2,nbasis=2) ## create bspline basis with linear (transform data)
+  Wfd0   <- fd(matrix(0,wbasis$nbasis,1),wbasis) ## setup `fda` object
+  WfdPar <- fdPar(Wfd0, Lfdobj = int2Lfd(0),lambda = 0) ## setup roughness for `fda` object
+    
+  ## ---- initial registration (warp functions)
+  fdobj   <- smooth.basis(argvals, densY, fdobj_basis, fdnames = c("x", "samples", "density"))$fd ## estimates the densities using bsplines 
+  regDens = register.fd(yfd=fdobj, WfdParobj = WfdPar,dbglev = 0,crit=1) ## register densities using roughness penalties
+
+  ## ---- reverse registration (inverse warp functions)
+  y0s = mean.fd(fdobj) ## get mean curve from registration
+  y0s$coefs = do.call(cbind, rep(list(y0s$coefs), ncol(fdobj$coefs)))
+  ## crit=2: broken in internal fda code
+  regDens = register.fd(y0fd = fdobj, yfd=y0s,WfdParobj = WfdPar, dbglev = 0,crit=1) ## register to get actual warping functions back to real data
+ 
+  ## ---- register raw data
+  xp = lapply(1:length(x), ## register each slide using inverse warp functions
+             function(ind){ 
+               x[[ind]][,normedVar] = 0;
+               x[[ind]][ which(x[[ind]][,var]>0),normedVar] = eval.fd(x[[ind]][which(x[[ind]][,var]>0), var], regDens$warpfd[ind]);
+               x[[ind]]})
+  
+  ##cb_atl = data.frame(data.table::rbindlist(xp))
+  
+  fittedY = as.matrix(eval.fd(y0s,argvals))
+  reg = list(regDens,fittedY,argvals)
+  saveRDS(reg,
+          paste0('~/../..//media/disk2/atlas_mxif/combat/handling_zeroes/method10_0301/registered_files/registration_files',normedVariter,'.Rds'))
+
+  
+  return(data.frame(data.table::rbindlist(xp))) ## combine data into initial form with registered values included
+}
+
+```
+
+
+```{r}
+## !! define a function to iterate for some input `var`
+## !! nbasis for hist approx, nbasis for transform
+## !! calculate densities of new data
+## !! register the basis function to that new data
+## !! do the mean registration to that
+
+## ---- iterative registration
+#cb_atl = cb_atl[,-c()]
+var = 'Median_Cell_PANCK_log10' 
+normedVar= paste0(var, '_fda_registered')
+for(i in 1:10){
+  print(paste0("Iteration: ",i))
+  cb_atl = register_var(var = var,
+                        normedVar = paste0(normedVar,i),
+                        normedVariter = i)
+  var = paste0(normedVar,i)
+}
+
+## with FDA registration up to 10 iterations:
+saveRDS(cb_atl, '~/../..//media/disk2/atlas_mxif/combat/handling_zeroes/method10_0301/atl_with_fda_210302.rds')
+
+## ---- quality checks
+reg1 = readRDS('~/../..//media/disk2/atlas_mxif/combat/handling_zeroes/method10_0301/registered_files/registration_files2.Rds')
+
+## (1) the unregistered curve (blue dashed line)
+## (2) the target curve (red dashed line)
+## (3) the registered curve (blue solid line).
+
+plotreg.fd(reg1[[1]])
+matplot(reg1[[3]],reg1[[2]],type="l")
+
+## ---- ploVIMENTIN
+g1 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Unadjusted') ## unadjusted
+g2 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10_fda_registered1,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered1') ## registered 
+g3 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10_fda_registered5,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered5') ## unadjusted
+g4 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10_fda_registered10,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered10') ## registered 
+g5vim =ggpubr::ggarrange(g1,g2,g3,g4)
+
+ggplot(cb_atl[cb_atl$SlideID == unique(cb_atl$SlideID)[10],]) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_log10,color='log10')) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_log10_fda_registered1,color='fda1')) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_log10_fda_registered5,color='fda5')) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_log10_fda_registered10,color='fda10')) +
+  facet_wrap(~SlideID)
+  
+g1 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_PANCK_log10,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Unadjusted') ## unadjusted
+g2 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_PANCK_log10_fda_registered1,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered1') ## registered 
+g3 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_PANCK_log10_fda_registered5,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered5') ## unadjusted
+g4 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_PANCK_log10_fda_registered10,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered10') ## registered 
+g5pan =ggpubr::ggarrange(g1,g2,g3,g4)
+
+g1 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_NAKATPASE_log10,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Unadjusted') ## unadjusted
+g2 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_NAKATPASE_log10_fda_registered1,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered1') ## registered 
+g3 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_NAKATPASE_log10_fda_registered5,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered5') ## unadjusted
+g4 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_NAKATPASE_log10_fda_registered10,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered10') ## registered 
+g5nak =ggpubr::ggarrange(g1,g2,g3,g4)
+```

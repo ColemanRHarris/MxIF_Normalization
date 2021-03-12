@@ -1,0 +1,119 @@
+---
+title: "Registration grave"
+author: "Coleman Harris"
+date: "3/11/2021"
+output: html_document
+---
+```{r}
+require(fda)
+require(ggplot2)
+```
+
+
+# from `reg_210224.Rmd`
+
+## fourier basis
+
+```{r}
+normedVar = paste0(var, '_fda_registered1')
+## ---- data setup
+x = split(cb_atl,factor(cb_atl$SlideID)) ## split data by slide
+rang = range(cb_atl[ which(cb_atl[,var]!=0),var]) ## get range of values != 0
+argvals = seq(rang[1],rang[2],len=len) ## get evenly spaced values for computation later
+densY = sapply(1:length(x), function(i){ ## calculate density for each nonzero value across slides
+  density(x[[i]][,var][which(x[[i]][,var]>0)],
+          from=rang[1],
+          to=rang[2],
+          n=len,
+          na.rm=TRUE)$y
+})
+
+## ---- setup basis functions
+#fdobj_basis = create.bspline.basis(rangeval = rang, norder = 4) ## create bspline basis with cubic splines
+fdobj_basis = create.fourier.basis(rangeval = rang, nbasis = 3) ## create bspline basis with cubic splines
+wbasis = create.bspline.basis(rangeval = rang, norder = 2) ## create bspline basis with linear
+Wfd0   <- fd(matrix(0,wbasis$nbasis,1),wbasis) ## setup `fda` object
+WfdPar <- fdPar(Wfd0, Lfdobj = int2Lfd(0),lambda = 0) ## setup roughness for `fda` object
+
+## ---- initial registration (warp functions)
+fdobj   <- smooth.basis(argvals, densY, fdobj_basis, fdnames = c("x", "samples", "density"))$fd ## estimates the densities using bsplines 
+regDens = register.fd(yfd=fdobj, WfdParobj = WfdPar, dbglev = 0) ## register densities using roughness penalties
+
+## ---- reverse registration (inverse warp functions)
+y0s = mean.fd(fdobj) ## get mean curve from registration
+y0s$coefs = do.call(cbind, rep(list(y0s$coefs), ncol(fdobj$coefs))) ## ??
+regDens = register.fd(y0fd = fdobj, yfd=y0s,WfdParobj = WfdPar, dbglev = 0) ## register to get actual warping functions back to real data
+
+## ---- register raw data
+xp = lapply(1:length(x), ## register each slide using inverse warp functions
+           function(ind){ 
+             x[[ind]][,normedVar] = 0;
+             x[[ind]][ which(x[[ind]][,var]>0),normedVar] = eval.fd(x[[ind]][which(x[[ind]][,var]>0), var], regDens$warpfd[ind]);
+             x[[ind]]})
+
+cb_atl = data.frame(data.table::rbindlist(xp)) ## combine data into initial form with registered values included
+
+## ---- plots
+g1 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Unadjusted') ## unadjusted
+g2 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10_fda_registered1,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered') ## registered 
+ggpubr::ggarrange(g1,g2)
+```
+
+## registering CDFs (derive CDFs)
+
+```{r}
+normedVar = paste0(var, '_fda_registered2')
+## ---- data setup
+x = split(cb_atl,factor(cb_atl$SlideID)) ## split data by slide
+rang = range(cb_atl[ which(cb_atl[,var]!=0),var]) ## get range of values != 0
+argvals = seq(rang[1],rang[2],len=len) ## get evenly spaced values for computation later
+
+## density
+densY = sapply(1:length(x), function(i){
+  vals = x[[i]][,var][which(x[[i]][,var]>0)]
+  z = ecdf(vals)
+  z(argvals)
+})
+
+## ---- setup basis functions
+fdobj_basis = create.bspline.basis(rangeval = rang, norder = 4) ## create bspline basis with cubic splines
+wbasis = create.bspline.basis(rangeval = rang, norder = 2) ## create bspline basis with linear
+Wfd0   <- fd(matrix(0,wbasis$nbasis,1),wbasis) ## setup `fda` object
+WfdPar <- fdPar(Wfd0, Lfdobj = int2Lfd(0),lambda = 0) ## setup roughness for `fda` object
+
+## ---- initial registration (warp functions)
+fdobj   <- smooth.basis(argvals, densY, fdobj_basis, fdnames = c("x", "samples", "density"))$fd ## estimates the densities using bsplines 
+fdobj = deriv.fd(fdobj)
+regDens = register.fd(yfd=fdobj, WfdParobj = WfdPar, dbglev = 0) ## register densities using roughness penalties
+
+## ---- reverse registration (inverse warp functions)
+y0s = mean.fd(fdobj) ## get mean curve from registration
+y0s$coefs = do.call(cbind, rep(list(y0s$coefs), ncol(fdobj$coefs))) ## ??
+regDens = register.fd(y0fd = fdobj, yfd=y0s,WfdParobj = WfdPar, dbglev = 0) ## register to get actual warping functions back to real data
+
+## ---- register raw data
+xp = lapply(1:length(x), ## register each slide using inverse warp functions
+           function(ind){ 
+             x[[ind]][,normedVar] = 0;
+             x[[ind]][ which(x[[ind]][,var]>0),normedVar] = eval.fd(x[[ind]][which(x[[ind]][,var]>0), var], regDens$warpfd[ind]);
+             x[[ind]]})
+
+cb_atl = data.frame(data.table::rbindlist(xp)) ## combine data into initial form with registered values included
+
+## ---- plots
+g1 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Unadjusted') ## unadjusted
+g2 = ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10_fda_registered2,col=SlideID)) + theme(legend.position = 'None') + ggtitle('Registered') ## registered 
+ggpubr::ggarrange(g1,g2)
+```
+
+## accuracy of fda?
+
+- Matches that of log10 transform across slides
+- Essentially the same as the modal transform with zeroes removed
+
+## What I've tried:
+- Different combinations of order/basis for the bsplines
+- Different parameters for the `fda` package
+- Different penalty configurations
+- Fourier basis function
+- Registering CDFs

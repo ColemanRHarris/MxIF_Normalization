@@ -1,0 +1,136 @@
+---
+title: "Clustering in atlas data (with clusters corrected)"
+output: html_document
+---
+
+```{r load data, message=FALSE, warning=FALSE}
+require(GGally)
+#cb_atl = readRDS('~/../../media/disk2/atlas_mxif/combat_201214/colon_map_20201214_combat_adj_with_clusters.rds')
+cb_atl = readRDS('~/../../media/disk2/atlas_mxif/combat_201214/colon_map_20201214_combat_adj_with_corrected_clusters.rds')
+
+## basic setup
+cb_atl$cluster_within_slide_raw = as.factor(cb_atl$cluster_within_slide_raw)
+cb_atl$cluster_within_slide_cb = as.factor(cb_atl$cluster_within_slide_cb)
+cb_atl$cluster_across_slide_raw = as.factor(cb_atl$cluster_across_slide_raw)
+cb_atl$cluster_across_slide_cb = as.factor(cb_atl$cluster_across_slide_cb)
+
+clus_vars = c('Median_Cell_NAKATPASE',
+              'Median_Cell_PANCK',
+              'Median_Cell_VIMENTIN')
+clus_vars_cb = c('Median_Cell_NAKATPASE_Adjusted',
+              'Median_Cell_PANCK_Adjusted',
+              'Median_Cell_VIMENTIN_Adjusted')
+
+plot_slide = "MAP01391_0000_01_01"
+plot_atl = cb_atl[cb_atl$SlideID == plot_slide,]
+plot_atl_raw = plot_atl[,c( clus_vars,
+                            clus_vars_cb,
+                           'cluster_within_slide_raw',
+                           'cluster_across_slide_raw',
+                           'cluster_within_slide_cb',
+                           'cluster_across_slide_cb')]
+```
+
+## In log-transformed space
+
+- E.g. the intensities are plotted using the log-transformed Median_Cell intensities.
+
+```{r log-transformed}
+g1 = ggpairs(plot_atl_raw,
+        columns=1:3,
+        lower=list(continuous = wrap("points",alpha=0.25)),
+        ggplot2::aes(color=cluster_across_slide_raw),
+        title = "Clusters fit on log-transformed data, across slides") +
+        theme_minimal()
+
+g2 = ggpairs(plot_atl_raw,
+        columns=1:3,
+        lower=list(continuous = wrap("points",alpha=0.25)),
+        ggplot2::aes(color=cluster_within_slide_raw),
+        title = "Clusters fit on log-transformed data, within slides") +
+        theme_minimal()
+
+g3 = ggpairs(plot_atl_raw,
+        columns=1:3,
+        lower=list(continuous = wrap("points",alpha=0.25)),
+        ggplot2::aes(color=cluster_across_slide_cb),
+        title = "Clusters fit on ComBat-adjusted data, across slides") +
+        theme_minimal()
+
+g4 = ggpairs(plot_atl_raw,
+        columns=1:3,
+        lower=list(continuous = wrap("points",alpha=0.25)),
+        ggplot2::aes(color=cluster_within_slide_cb),
+        title = "Clusters fit on ComBat-adjusted data, within slides") +
+        theme_minimal()
+
+print(g1)
+print(g2)
+print(g3)
+print(g4)
+```
+
+## In ComBat-adjusted space
+
+- E.g. the intensities are plotted using the ComBat-adjusted Median_Cell intensities.
+
+```{r combat-adjusted}
+g1p = ggpairs(plot_atl_raw,
+        columns=4:6,
+        lower=list(continuous = wrap("points",alpha=0.25)),
+        ggplot2::aes(color=cluster_across_slide_raw),
+        title = "Clusters fit on log-transformed data, across slides") +
+        theme_minimal()
+
+g2p = ggpairs(plot_atl_raw,
+        columns=4:6,
+        lower=list(continuous = wrap("points",alpha=0.25)),
+        ggplot2::aes(color=cluster_within_slide_raw),
+        title = "Clusters fit on log-transformed data, within slides") +
+        theme_minimal()
+
+g3p = ggpairs(plot_atl_raw,
+        columns=4:6,
+        lower=list(continuous = wrap("points",alpha=0.25)),
+        ggplot2::aes(color=cluster_across_slide_cb),
+        title = "Clusters fit on ComBat-adjusted data, across slides") +
+        theme_minimal()
+
+g4p = ggpairs(plot_atl_raw,
+        columns=4:6,
+        lower=list(continuous = wrap("points",alpha=0.25)),
+        ggplot2::aes(color=cluster_within_slide_cb),
+        title = "Clusters fit on ComBat-adjusted data, within slides") +
+        theme_minimal()
+
+print(g1p)
+print(g2p)
+print(g3p)
+print(g4p)
+```
+
+## Confusion matrices
+
+```{r}
+require(caret)
+require(knitr)
+require(kableExtra)
+
+## truth: within slide, prediction: across slide
+cmat1 = confusionMatrix(data = cb_atl$cluster_across_slide_raw,
+                        reference = cb_atl$cluster_within_slide_raw)
+
+## truth: within slide, prediction: combat across slide
+cmat2 = confusionMatrix(data = cb_atl$cluster_across_slide_cb,
+                        reference = cb_atl$cluster_within_slide_raw)
+
+cmat1$table
+cmat2$table
+
+cmat1$overall
+cmat2$overall
+
+cmat1$byClass
+cmat2$byClass
+```
+

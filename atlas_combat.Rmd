@@ -1,0 +1,623 @@
+---
+title: "Atlas data"
+author: "Coleman Harris"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source('~/atlas/all_combat_functions.R')
+
+## Original atlas data: ~/../../media/disk2/atlas_mxif/colon_map_20201209.rds
+## ComBat-adjusted atlas data: ~/../../media/disk2/atlas_mxif/combat/colon_map_20201209_combat_adj.rds 
+
+```
+
+```{r}
+## original atlas data, unadjusted
+atl <- readRDS("~/../../media/disk2/atlas_mxif/colon_map_20201209.rds")
+atl$unique_id = paste0(atl$ID,atl$SlideID,atl$Pos,atl$x)
+#cb_atl = readRDS('~/../../media/disk2/atlas_mxif/combat/colon_map_20201209_combat_adj.rds')
+```
+
+```{r}
+### basic normalization
+all_vars = grep('Median_Cell', names(atl), value=TRUE)
+all_vars = all_vars[!(all_vars %in%  c('Median_Cell_CD45B',
+                                       'Median_Cell_GACTIN',
+                                       'Median_Cell_PDL1',
+                                       'Median_Cell_CD45',
+                                       'Median_Cell_DAPI'))]
+
+## remove single images
+atl = remove_single_images(atl,image_var="Pos")
+
+## log transform
+#for (var in all_vars){
+#  atl[,var] = log10(atl[,var]+1)
+#}
+```
+
+```{r}
+## run simple normalization
+
+test_vars = paste0('Median_Cell_',c('NAKATPASE',"PANCK","VIMENTIN"),'_log10')
+
+simple_adjust = function(data, column){
+  data = as.data.frame(data)
+	data[,paste0(column,"_simple_adjusted")] = data[,column]
+	zdata = data[data[,column]<=0,]
+	data = data[data[,column]>0,]
+	data[,paste0(column,"_simple_adjusted")] =exp(scale(log(data[,column])))
+	rbind(data,zdata) ## need to match on UID?
+}
+
+slides = unique(atl$SlideID)
+for(v in test_vars){
+  print(v)
+  slide_adjusts = list()
+  for(i in 1:length(slides)){
+      slide_i = simple_adjust(data=atl[atl$SlideID == slides[i],],
+                                         column=v)
+      slide_adjusts[[i]] = x
+  }
+  
+  atl = as.data.frame(data.table::rbindlist(slide_adjusts))
+}
+```
+
+
+```{r}
+### run simple2 normalization
+test_vars = paste0('Median_Cell_',c('NAKATPASE',"PANCK","VIMENTIN"),'_log10')
+
+## collect all slide means and sds from log10 scale
+all_slide_means = do.call(cbind,
+          lapply(X=test_vars,   function(v){  
+                  cb_atl[cb_atl[,v] > 0,] %>% 
+                    group_by(SlideID) %>%
+                    summarise(!!paste0(v,'_mean'):=exp(mean(log(get(v)))),
+                              !!paste0(v,'_sd'):=exp(sd(log(get(v)))))})
+  )
+all_slide_means = all_slide_means[,!(colnames(all_slide_means) %>% duplicated())]
+
+
+simple2_adjust = function(data, column){
+  data = as.data.frame(data)
+	data[,paste0(column,"_simple2_adjusted")] = data[,column]
+	zdata = data[data[,column]<=0,]
+	data = data[data[,column]>0,]
+	data[,paste0(column,"_simple2_adjusted")] =exp(scale(log(data[,column])))
+	
+	## multiply by mean standard deviation
+	sigma = mean(all_slide_means[,paste0(v,'_sd')])
+	mu = mean(all_slide_means[,paste0(v,'_mean')])
+	## add in the mean mean
+	data[,paste0(column,"_simple2_adjusted")] = (data[,paste0(column,"_simple2_adjusted")] * sigma) + mu
+
+	rbind(data,zdata) ## need to match on UID?
+}
+
+slides = unique(cb_atl$SlideID)
+for(v in test_vars){
+  print(v)
+  slide_adjusts = list()
+  for(i in 1:length(slides)){
+      slide_adjusts[[i]] = simple2_adjust(data=cb_atl[cb_atl$SlideID == slides[i],],
+                                         column=v)
+  }
+  
+  cb_atl = as.data.frame(data.table::rbindlist(slide_adjusts))
+}
+
+```
+
+```{r}
+## run basic modal transformation
+test_vars = paste0('Median_Cell_',c('NAKATPASE',"PANCK","VIMENTIN"),'_log10_fda_registered')
+
+x=max(locmodes(cb_atl[,test_vars[1]],3)$locations)
+
+## collect all slide means and sds from log10 scale
+all_slide_modes = do.call(cbind,
+          lapply(X=test_vars,   function(v){  
+                  cb_atl %>% 
+                    group_by(SlideID) %>%
+                    summarise(!!paste0(v,'_mode'):=max(Modes(get(v))$modes))})
+  )
+all_slide_modes = all_slide_modes[,!(colnames(all_slide_modes) %>% duplicated())]
+
+
+modal_adjust = function(data, column, slide){
+  data = as.data.frame(data)
+  
+	data[,paste0(column,"_fda_modal_adjusted")] = data[,column]
+	
+	## multiply by mean standard deviation
+	indiv_mode = all_slide_modes[all_slide_modes$SlideID == slides[i],paste0(column,'_mode')]
+	mean_mode = mean(all_slide_modes[,paste0(column,'_mode')])
+	
+	## add in the mean mean
+	data[,paste0(column,"_fda_modal_adjusted")] = (data[,paste0(column,"_fda_modal_adjusted")] - indiv_mode) + mean_mode
+
+	return(data) ## need to match on UID?
+}
+
+slides = unique(cb_atl$SlideID)
+for(v in test_vars){
+  print(v)
+  slide_adjusts = list()
+  for(i in 1:length(slides)){
+      slide_adjusts[[i]] = modal_adjust(data=cb_atl[cb_atl$SlideID == slides[i],],
+                                         column=v,
+                                        slide = slides[i])
+  }
+  
+  cb_atl = as.data.frame(data.table::rbindlist(slide_adjusts))
+}
+
+
+```
+
+```{r}
+## run basic modal transformation (w zeroes removed)
+test_vars = paste0('Median_Cell_',c('NAKATPASE',"PANCK","VIMENTIN"),'_log10')
+
+#x=max(locmodes(cb_atl[,test_vars[1]],3)$locations)
+
+## collect all slide modes from log10 scale
+all_slide_modes = do.call(cbind,
+          lapply(X=test_vars,   function(v){  
+                  cb_atl %>% 
+                    group_by(SlideID) %>%
+                    summarise(!!paste0(v,'_mode'):=head(Modes(get(v))$modes,2))})
+  )
+all_slide_modes = all_slide_modes[,!(colnames(all_slide_modes) %>% duplicated())]
+
+
+cb_atl %>% 
+  group_by(SlideID) %>%
+  Modes(get(v))$modes
+
+slides = unique(cb_atl$SlideID)
+  
+modes2 = lapply(X = 1:length(slides),
+       FUN = function(i){ sort(head(Modes(cb_atl[cb_atl$SlideID == slides[i],v])$modes,2)) })
+
+modes_dat = data.frame(matrix(unlist(modes2),ncol = 2,nrow=length(modes2),byrow = T))
+modes_dat$SlideID = slides
+
+modal_adjust_zeroes_removed = function(data, column, slide){
+  data = as.data.frame(data)
+  
+	data[,paste0(column,"_modal_adjusted_zeroes_removed2")] = data[,column]
+	
+	zdata = data[data[,column]<=0,]
+	data = data[data[,column]>0,]
+	
+	## multiply by mean standard deviation
+	indiv_mode = all_slide_modes[all_slide_modes$SlideID == slides[i],paste0(column,'_mode')]
+	mean_mode = mean(all_slide_modes[,paste0(column,'_mode')])
+	
+	## add in the mean mean
+	data[,paste0(column,"_modal_adjusted_zeroes_removed2")] = (data[,paste0(column,"_modal_adjusted_zeroes_removed2")] - indiv_mode) + mean_mode
+
+	return(rbind(data,zdata)) ## need to match on UID?
+}
+
+modal_adjust_zeroes_removed2 = function(data, column, slide){
+  data = as.data.frame(data)
+  
+	data[,paste0(column,"_modal_adjusted_zeroes_removed3")] = data[,column]
+	
+	zdata = data[data[,column]<=0,]
+	data = data[data[,column]>0,]
+	
+	## multiply by mean standard deviation
+	#indiv_mode = all_slide_modes[all_slide_modes$SlideID == slides[i],paste0(column,'_mode')]
+	m1 = modes_dat[modes_dat$SlideID == slide,]$X1
+	m2 = modes_dat[modes_dat$SlideID == slide,]$X2
+	mean_mode1 = mean(modes_dat$X1)
+	mean_mode2 = mean(modes_dat$X2)
+	
+	## add in the mean mean
+	data[,paste0(column,"_modal_adjusted_zeroes_removed3")] = (data[,paste0(column,"_modal_adjusted_zeroes_removed3")] - (m1 - m2)) + mean_mode2
+
+	return(rbind(data,zdata)) ## need to match on UID?
+}
+
+#slides = unique(cb_atl$SlideID)
+for(v in test_vars){
+  print(v)
+  slide_adjusts = list()
+  for(i in 1:length(slides)){
+      slide_adjusts[[i]] = modal_adjust_zeroes_removed2(data=cb_atl[cb_atl$SlideID == slides[i],],
+                                         column=v,
+                                        slide = slides[i])
+  }
+  
+  cb_atl = as.data.frame(data.table::rbindlist(slide_adjusts))
+}
+
+ggplot(cb_atl) + geom_density(aes(x=Median_Cell_NAKATPASE_log10_modal_adjusted_zeroes_removed3,color=SlideID)) + theme(legend.position = "None")
+```
+## playing with `registr` and `fdasrvf`
+
+```{r}
+test_vars = paste0('Median_Cell_',c('NAKATPASE',"PANCK","VIMENTIN"),'_log10')
+
+## registr
+registr_data = data.frame()
+
+sub_atl = cb_atl [cb_atl[,'Median_Cell_VIMENTIN_log10'] > 0,]
+
+for(s in unique(cb_atl$SlideID)){
+  #dv = density(sub_atl[sub_atl$SlideID == s,'Median_Cell_VIMENTIN_log10_modal_adjusted_zeroes_removed'])
+  dv = density(sub_atl[sub_atl$SlideID == s,'Median_Cell_VIMENTIN_log10'])
+  one_slide = data.frame(dv$x,dv$y)
+  one_slide$slide = s
+  registr_data = rbind(registr_data,one_slide)
+}
+colnames(registr_data) = c("index","value","id")
+
+
+## Kt=7, Kh=3: 589
+## Kt=8, Kh=5: 560
+## Kt=9, Kh=4: 539
+## Kt=10, Kh=5: 519
+## Kt=11, Kh=4: 314
+## Kt=12, Kh=5: 305
+
+registr_bin1 = register_fpca(Y = registr_data,
+                            family = "gaussian")
+registr_bin2 = register_fpca(Y = registr_data,
+                            family = "gaussian",
+                            Kt = 9,
+                            Kh = 4,
+                            npc = 1)
+registr_bin3 = register_fpca(Y = registr_data,
+                            family = "gaussian",
+                            Kt = 12,
+                            Kh = 5,
+                            npc = 1)
+registr_bin4 = register_fpca(Y = registr_data,
+                            family = "gaussian",
+                            gradient = FALSE,
+                            warping = "piecewise_linear2",Kh = 3,Kt=4)
+
+## remove the zeroes
+
+## log10 data
+ggplot(registr_data) +
+  geom_line(aes(x=index,y=value,color=id)) +
+  theme(legend.position = "None")
+
+## Modal adjustment
+#ggplot(cb_atl) + 
+#  geom_density(aes(x=Median_Cell_VIMENTIN_log10_modal_adjusted_zeroes_removed,color=SlideID)) +
+#  theme(legend.position = "None")
+
+registr_adj_data1 = registr_bin1$Y
+ggplot(registr_adj_data1) +
+  geom_line(aes(x=t_hat,y=value,color=id)) +
+  theme(legend.position = "None")
+
+registr_adj_data2 = registr_bin2$fpca_obj$Yhat
+ggplot(registr_adj_data2) +
+  geom_line(aes(x=t_hat,y=value,color=id)) +
+  theme(legend.position = "None")
+
+registr_adj_data3 = registr_bin3$fpca_obj$Yhat
+ggplot(registr_adj_data3) +
+  geom_line(aes(x=index,y=value,color=id)) +
+  theme(legend.position = "None")
+
+plot(registr_bin4$Y$tstar,registr_bin4$Y$t_hat)
+
+registr_adj_data4 = registr_bin4$Y
+ggplot(registr_adj_data4) +
+  geom_line(aes(x=t_hat,y=value,color=id)) +
+  theme(legend.position = "None")
+
+ ggplot(sub_atl) + 
+   geom_density(aes(x=Median_Cell_VIMENTIN_log10,color=SlideID))  +
+   theme(legend.position = "None")
+
+## match on slide ID
+## match on closest domain value
+
+for(s in unique(sub_atl$SlideID)){
+  del = abs(sub_atl[sub_atl$SlideID == s,]$Median_Cell_VIMENTIN_log10_modal_adjusted_zeroes_removed - registr_adj_data4[registr_adj_data4$id == s,]$t_hat)
+}
+
+index = unlist(lapply(X=1:length(sub_atl$Median_Cell_VIMENTIN_log10_modal_adjusted_zeroes_removed), FUN=function(i){
+  del = abs(sub_atl$Median_Cell_VIMENTIN_log10_modal_adjusted_zeroes_removed[i] - registr_adj_data4$t_hat)
+  return(which(del==min(del)))
+}))
+
+cols = unlist(lapply(X=1:length(sub_atl$SlideID), FUN=function(i){
+  which(sub_atl$SlideID[i] == colnames(df))
+}))
+
+ts = df[index,]
+cs = ts[cols]
+cs = matrix(cs)
+yhats = diag(cs)
+
+sub_atl$Median_Cell_VIMENTIN_log10_registered = yhats[[1]]
+ggplot(sub_atl) + 
+  geom_density_ridges(aes(x=Median_Cell_VIMENTIN_log10_registered,y=SlideID,fill=SlideID))  +
+  theme(legend.position = "None")
+```
+
+
+```{r}
+## registr
+ggplot(registr_adj_data4) +
+  geom_line(aes(x=t_hat,y=value,color=id)) +
+  theme(legend.position = "None")
+
+## fdasrvf
+ggplot(adj_fda_data) + geom_line(aes(x=x,y=yhat,color=SlideID))  +
+  theme(legend.position = "None")
+
+ggplot(sub_atl) + 
+  geom_density_ridges(aes(x=Median_Cell_VIMENTIN_log10_registered,y=SlideID,fill=SlideID))  +
+  theme(legend.position = "None")
+
+## what do we think about the alignment?
+## conversion from adjusted densities back into raw?
+## is my way working?
+```
+
+
+```{r}
+library(fdasrvf)
+
+## registr
+fda_data = data.frame(seq(from=0,to=5,length.out=512))
+colnames(fda_data) = c("x")
+
+sub_atl = cb_atl[cb_atl[,'Median_Cell_VIMENTIN_log10'] > 0,]
+
+for(s in unique(cb_atl$SlideID)){
+  dv = density(sub_atl[sub_atl$SlideID == s,'Median_Cell_VIMENTIN_log10'],
+               from = 0,
+               to = 5)
+  #dv = density(sub_atl[sub_atl$SlideID == s,'Median_Cell_VIMENTIN_log10'],
+  #             from = 0,
+  #             to = 5)
+  fda_data[,s] = dv$y
+}
+
+t1 = fda_data$x
+f1 = as.matrix(fda_data[,-1])
+
+out = align_fPCA(f = f1, time = t1)
+
+fn = out$fn
+df = data.frame(fn)
+colnames(df) = colnames(f1)
+
+adj_fda_data = data.frame(rep(seq(from=0,to=5,length.out=512),ncol(df)))
+colnames(adj_fda_data) = c("x")
+
+all_vals = c()
+for(i in 1:ncol(df)){
+  all_vals = c(all_vals, df[,i])
+}
+adj_fda_data$SlideID = rep(colnames(df),each=nrow(df))
+adj_fda_data$yhat = all_vals
+
+x = seq(from=0,to=5,length.out=512)
+sub_atl$Median_Cell_VIMENTIN_log10_registered = NA
+
+
+index = unlist(lapply(X=1:length(sub_atl$Median_Cell_VIMENTIN_log10), FUN=function(i){
+  del = abs(sub_atl$Median_Cell_VIMENTIN_log10[i] - x)
+  return(which(del==min(del)))
+}))
+
+cols = unlist(lapply(X=1:length(sub_atl$SlideID), FUN=function(i){
+  which(sub_atl$SlideID[i] == colnames(df))
+}))
+
+ts = df[index,]
+cs = ts[cols]
+cs = matrix(cs)
+yhats = diag(cs)
+
+sub_atl$Median_Cell_VIMENTIN_log10_registered = yhats[[1]]
+ggplot(sub_atl) + 
+  geom_density_ridges(aes(x=Median_Cell_VIMENTIN_log10_registered,y=SlideID,fill=SlideID))  +
+  theme(legend.position = "None")
+```
+
+## Adapted `fda` code
+
+```{r}
+require(fda)
+var = 'Median_Cell_VIMENTIN_log10'
+cb_atl = readRDS("~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method9_0122/atl_with_all_methods_updated_0122.rds")
+len = 512
+
+## ----- starts here
+x = split(cb_atl,factor(cb_atl$SlideID))
+rang = range(cb_atl[ which(cb_atl[,var]!=0),var])
+#rang = c(1,4)
+
+## creating 
+fdobj_basis = create.bspline.basis(rangeval = rang,
+                                   norder = 4)
+#fdobj_basis = create.fourier.basis(rangeval = rang)
+#fdobj_basis = create.polygonal.basis(rangeval = rang)
+#wbasis = create.monomial.basis(rangeval = rang) ## warping function basis
+wbasis = create.bspline.basis(rangeval = rang, norder = 2)
+#wbasis = create.polygonal.basis(rangeval = rang)
+# debug the basis matrix
+#plot(wbasis)
+Wfd0   <- fd(matrix(0,wbasis$nbasis,1),wbasis)
+WfdPar <- fdPar(Wfd0,
+                #Lfdobj = int2Lfd(max(0, norder(fdobj_basis)-2)),
+                Lfdobj = int2Lfd(0),
+                #Lfdobj = vec2Lfd(c(0,(2*pi/diff(rang))^2,0),rang),
+                #lambda = 10000
+                )
+#WfdPar$lambda = 0
+
+
+## These lines could be improved because it first estimates a histogram and smooths it
+# Would be better to estimate the CDF with bsplines then differentiate it.
+# deriv.fd -- differentiates a function
+densY = sapply(1:length(x), function(i){
+  density(x[[i]][,var][which(x[[i]][,var]>0)],
+          from=rang[1],
+          to=rang[2],
+          n=len,
+          na.rm=TRUE)$y
+})
+argvals = seq(rang[1],rang[2],len=len)
+## capture the shape of the histogram
+fdobj   <- smooth.basisPar(argvals, densY, fdobj_basis, ## estimates the density using bsplines
+                        fdnames = c("x", "samples", "density"))$fd
+#fdobj2 = fdobj^2
+
+#regDens   <- landmarkreg(fdobj, landmarks_adj, WfdPar=WfdPar, monwrd=TRUE)
+# default is piecewise linear basis -- scale and shift
+regDens = register.fd(yfd=fdobj, 
+                      WfdParobj = WfdPar,
+                      dbglev = 0)
+
+# reverse registration
+y0s = mean.fd(fdobj)
+y0s$coefs = do.call(cbind,
+                    rep(list(y0s$coefs),
+                        ncol(fdobj$coefs)))
+regDens = register.fd(y0fd = fdobj, 
+                      yfd=y0s, 
+                      WfdParobj = WfdPar,
+                      dbglev = 0)
+
+# View the warping functions
+#warpedX = as.matrix(eval.fd(regDens$warpfd,argvals))
+#matplot(argvals,warpedX,type="l")
+
+# View the estimated functions (ugly)
+#fittedY = as.matrix(eval.fd(fdobj,argvals))
+#matplot(argvals,fittedY,type="l")
+
+# View the estimated functions (ugly)
+#warpedY = as.matrix(eval.fd(regDens$regfd,argvals))
+#matplot(argvals,warpedY,type="l")
+
+# plots the registered functions
+#plotreg.fd(regDens)
+
+# Apply the warping function
+normedVar = paste0(var, '_fda_registered')
+
+x = lapply(1:length(x), 
+           function(ind){ 
+             x[[ind]][,normedVar] = 0;
+             x[[ind]][ which(x[[ind]][,var]>0),normedVar] = eval.fd(x[[ind]][which(x[[ind]][,var]>0), var], regDens$warpfd[ind]);
+             x[[ind]]})
+
+# plot the warped histograms
+#pdat = do.call(rbind, x)
+pdat = data.table::rbindlist(x)
+cb_atl[,normedVar] = data.frame(pdat)[,normedVar]
+rm(pdat)
+#gc()
+
+#var <- normedVar
+
+## ------ ends here
+  
+
+## unadjusted densities
+
+ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10,col=SlideID)) + theme(legend.position = 'None')
+ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10_fda_registered,col=SlideID)) + theme(legend.position = 'None')
+
+ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10_modal_adjusted_zeroes_removed,col=SlideID)) + theme(legend.position = 'None')
+ggplot(cb_atl) + geom_density(aes(x=Median_Cell_VIMENTIN_log10_modal_adjusted_zeroes_removed_fda_registered,col=SlideID)) + theme(legend.position = 'None')
+
+```
+
+
+
+```{r}
+ggplot(cb_atl) + 
+  geom_density(aes(x=Median_Cell_VIMENTIN_log10_modal_adjusted_zeroes_removed,color=SlideID))
+
+ggplot(cb_atl) + 
+  geom_density(aes(x=Median_Cell_VIMENTIN_ComBat_Adjusted,color=SlideID))
+```
+
+
+
+```{r}
+source('~/atlas/all_combat_functions_slide_only.R')
+
+cb_slide_atl = run_full_combat_slide_only(data = atl,
+                               save_path = '~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method7_0107/slide_only/',
+                               vars_to_adjust = test_vars, 
+                               slide_var = "SlideID",
+                               #image_var = "Pos",
+                               uid_var = "unique_id")
+
+cb_slide_atl$Median_Cell_NAKATPASE_log10 = log10(cb_slide_atl$Median_Cell_NAKATPASE+1)
+cb_slide_atl$Median_Cell_PANCK_log10 = log10(cb_slide_atl$Median_Cell_PANCK+1)
+cb_slide_atl$Median_Cell_VIMENTIN_log10 = log10(cb_slide_atl$Median_Cell_VIMENTIN+1)
+```
+
+
+```{r include=FALSE}
+cb_atl = run_full_combat(data = atl,
+                save_path = '~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method4_1222/',
+                vars_to_adjust = paste0('Median_Cell_',c('NAKATPASE',
+                                                         "PANCK",
+                                                         "VIMENTIN")),  #all_vars, 
+                slide_var = "SlideID",
+                image_var = "Pos",
+                uid_var = "unique_id",
+                remove_zeroes=TRUE)
+
+## for (var in c(all_vars,paste0(all_vars,"_Adjusted"))){
+##   cb_atl[,var] = log10(cb_atl[,var]+1)
+## }
+
+saveRDS(cb_atl,'~/../../media/disk2/atlas_mxif/combat/handling_zeroes/method4_1222/colon_map_20201222_combat_adj.rds')
+```
+
+```{r}
+cb_atl$Median_Cell_NAKATPASE_Adjusted = log10(cb_atl$Median_Cell_NAKATPASE_Adjusted+1)
+cb_atl$Median_Cell_PANCK_Adjusted = log10(cb_atl$Median_Cell_PANCK_Adjusted+1)
+cb_atl$Median_Cell_VIMENTIN_Adjusted = log10(cb_atl$Median_Cell_VIMENTIN_Adjusted+1)
+
+print(hist(cb_atl$Median_Cell_NAKATPASE_Adjusted, breaks=60))
+hist(cb_atl$Median_Cell_PANCK_Adjusted, breaks=60)
+hist(10^(cb_atl$Median_Cell_VIMENTIN_Adjusted)-1, breaks=60)
+
+## look at two slides different by VIM
+cb_atl %>% 
+  group_by_at("SlideID") %>% 
+  mean(Median_Cell_VIMENTIN)
+
+for(s in unique(cb_atl$SlideID)){
+  print(paste0(s," -- ",
+               mean(cb_atl[cb_atl$SlideID == s,]$Median_Cell_VIMENTIN)))
+}
+```
+
+```{r}
+slide1 = cb_atl[cb_atl$SlideID %in% c("MAP03331_0000_01_01"),]
+slide2 = cb_atl[cb_atl$SlideID %in% c("MAP02112_0000_02_02"),]
+
+hist(log10(slide1$Median_Cell_VIMENTIN+1),breaks=60)
+hist(slide2$Median_Cell_VIMENTIN,breaks=60)
+
+hist(slide1$Median_Cell_VIMENTIN_Adjusted,breaks=60)
+hist(slide2$Median_Cell_VIMENTIN_Adjusted,breaks=60)
+```
+

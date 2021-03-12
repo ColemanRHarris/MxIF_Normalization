@@ -1,0 +1,123 @@
+---
+title: "fda experiments"
+author: "Coleman Harris"
+date: "2/16/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fda)
+library(LaplacesDemon)
+library(ggplot2)
+
+dat = readRDS("~/Dropbox (VUMC)/atlas_project/spatial_category_analysis.rds")
+```
+
+## slide densities
+
+```{r first plot}
+ggplot(dat) +
+  geom_density(aes(x=Median_Cell_SOX9,color=SlideID))
+```
+
+## setup for `fda`
+```{r fda setup}
+slides = unique(dat$SlideID)
+
+l1 = lapply(X=1:length(slides), FUN=function(i){
+  Modes(dat[dat$SlideID == slides[i],]$Median_Cell_SOX9,min.size = 0.1)$modes
+})
+
+for(i in 1:length(l1)){
+  if(length(l1[[i]]) < 2){
+    l1[[i]] = sort(c(0,l1[[i]]))
+  } else{
+    l1[[i]] = sort(l1[[i]])
+  }
+}
+
+l1[[24]] = c(0,2.520514287)
+
+landmarks = data.frame()
+for(i in 1:length(l1)){
+  landmarks = rbind(landmarks,l1[[i]])
+}
+colnames(landmarks) =c("m1","m2")
+
+landmarks_adj = landmarks[-17,]
+bad_slide = slides[17]
+adj_dat = dat[!(dat$SlideID == bad_slide),]
+##x = split(dat,factor(dat$SlideID))
+x = split(adj_dat,factor(adj_dat$SlideID))
+```
+
+## `fda` plots
+```{r fda plots}
+var = 'Median_Cell_SOX9'
+rang = range(dat[ which(dat[,var]!=0),var])
+#rang = rang + rang * c(-.05, .05)
+len = 512
+
+for(it in 1:10){
+  ## creating 
+  fdobj_basis = create.bspline.basis(rangeval = rang,
+                                     norder = 4,
+                                     nbasis = 5)
+  #wbasis = create.monomial.basis(rangeval = c(lower,upper),exponents = c(0,1)) ## warping function basis
+  wbasis = create.bspline.basis(rangeval = rang,norder=2)
+  # debug the basis matrix
+  #plot(wbasis)
+  Wfd0   <- fd(matrix(0,wbasis$nbasis,1),wbasis)
+  WfdPar <- fdPar(Wfd0, Lfdobj = int2Lfd(0),lambda = 0)
+  #WfdPar$lambda = 0
+  
+  
+  ## These lines could be improved because it first estimates a histogram and smooths it
+  # Would be better to estimate the CDF with bsplines then differentiate it.
+  # deriv.fd -- differentiates a function
+  densY = sapply(1:length(x), function(i){
+    density(x[[i]]$Median_Cell_SOX9[which(x[[i]]$Median_Cell_SOX9>0)],from=rang[1],to=rang[2],n=len,na.rm=TRUE)$y
+  })
+  argvals = seq(lower,upper,len=len)
+  ## capture the shape of the histogram
+  fdobj   <- smooth.basis(argvals, densY, fdobj_basis, ## estimates the density using bsplines
+                          fdnames = c("x", "samples", "density"))$fd
+  
+  #regDens   <- landmarkreg(fdobj, landmarks_adj, WfdPar=WfdPar, monwrd=TRUE)
+  # default is piecewise linear basis -- scale and shift
+  regDens = register.fd(yfd=fdobj, WfdParobj = WfdPar)
+  # reverse registration
+  y0s = mean.fd(fdobj)
+  y0s$coefs = do.call(cbind, rep(list(y0s$coefs), ncol(fdobj$coefs)))
+  regDens = register.fd(y0fd = fdobj, yfd=y0s, WfdParobj = WfdPar)
+  
+  # View the warping functions
+  #warpedX = as.matrix(eval.fd(regDens$warpfd,argvals))
+  #matplot(argvals,warpedX,type="l")
+  
+  # View the estimated functions (ugly)
+  #fittedY = as.matrix(eval.fd(fdobj,argvals))
+  #matplot(argvals,fittedY,type="l")
+  
+  # View the estimated functions (ugly)
+  #warpedY = as.matrix(eval.fd(regDens$regfd,argvals))
+  #matplot(argvals,warpedY,type="l")
+  
+  # plots the registered functions
+  plotreg.fd(regDens)
+  
+  # Apply the warping function
+  normedVar = paste0(var, '_normed')
+  x = lapply(1:length(x), function(ind){ x[[ind]][,normedVar] = 0; x[[ind]][ which(x[[ind]][,var]>0),normedVar] = eval.fd(x[[ind]][which(x[[ind]][,var]>0), var], regDens$warpfd[ind]); x[[ind]]})
+  
+  # plot the warped histograms
+  pdat = do.call(rbind, x)
+  ggplot(pdat) +
+  geom_density(aes(x=Median_Cell_SOX9,color=SlideID))
+  ggplot(pdat) +
+  geom_density(aes(x=Median_Cell_SOX9_normed,color=SlideID))
+  
+}
+```
+
